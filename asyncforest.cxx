@@ -98,6 +98,7 @@ namespace Data {
       Member m2;
       Member m3;
       Member m4;
+      Member m5;
    };
 }
 
@@ -325,6 +326,7 @@ namespace Axel {
          fBufferMgrs.emplace_back(1, clusterMgr);
          fBufferMgrs.emplace_back(2, clusterMgr);
          fBufferMgrs.emplace_back(3, clusterMgr);
+         fBufferMgrs.emplace_back(4, clusterMgr);
          fCurrent = Assemble(clusterMgr);
          fNext = std::async([this, &clusterMgr] {return Assemble(clusterMgr);});
       }
@@ -335,14 +337,14 @@ namespace Axel {
       {
          // Get the next entry from each branch's buffer.
          // Advance to next buffer if needed.
-         std::array<std::future<Data::Member>, 4> futureMembers;
+         std::array<std::future<Data::Member>, 5> futureMembers;
          int idx = 0;
          for (auto &bufMgr: fBufferMgrs) {
             bufMgr.NextEntry(clusterMgr);
             futureMembers[idx++] = std::async(Ops::Deserialization_t(), bufMgr.fCurrent);
          }
          // Assemble Event from deserialized Member-s.
-         return {futureMembers[0].get(), futureMembers[1].get(), futureMembers[2].get(), futureMembers[3].get()};
+         return {futureMembers[0].get(), futureMembers[1].get(), futureMembers[2].get(), futureMembers[3].get(), futureMembers[4].get()};
       }
 
       /// Advance to next event; start assembling the new next.
@@ -376,7 +378,7 @@ void time(FUNC &func)
    using clock = std::chrono::high_resolution_clock;
    auto start = clock::now();
    func();
-   std::cout << (clock::now() - start).count()/1'000'000'000. << "s\n";
+   std::cout << (clock::now() - start).count() / 1'000'000'000. << "s\n";
 }
 
 /// Time the different scheduling options.
