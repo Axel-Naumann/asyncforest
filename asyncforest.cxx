@@ -366,7 +366,7 @@ namespace Axel {
          // Process event data; 0.01s/event
          Ops::WasteCPU(0.01);
       }
-      std::cout << "Processed " << clusterMgr.fClusterIdx << "clusters containing "
+      std::cout << "Processed " << clusterMgr.fClusterIdx << " clusters containing "
          << evtMgr.fEntry << " entries\n";
    }
 } // namespace Axel
