@@ -75,10 +75,11 @@ namespace Data {
 
       Cluster():
          fBranches{
-            {{.3, 1}, {.4, 1}, {.3, 1}, {.5, 2}, {.3, 1}, {.5, 2}, {.4, 2}},
-            {{1., 10}},
-            {{2., 10}},
-            {{1., 4}, {1., 5}, {0.2, 1}}
+            {{.3, 1}, {.4, 1}, {.3, 1}, {.5, 2}, {.6, 1}, {.5, 2}, {.3, 2}}, // 2.9MB
+            {{.1, 10}}, // 0.1MB
+            {{2., 10}}, // 2.0MB
+            {{22.8, 10}}, // 22.8MB
+            {{1., 4}, {1., 5}, {0.2, 1}} // 2.2MB
          }
       {}
    };
@@ -128,6 +129,10 @@ template <class OP, class FUNC, class... ARGS>
 auto AsyncOrNot(FUNC func, ARGS... args) {
    constexpr const std::launch launchDefault
       = std::launch::async | std::launch::deferred;
+
+   // Simulate task scheduling overhead:
+   if (OP::kIsWorthATask)
+      WasteCPU(0.01);
 
    return std::async(OP::kIsWorthATask ? launchDefault : std::launch{}, func, args...);
 }
