@@ -359,7 +359,7 @@ namespace Axel {
    {
       ClusterManager clusterMgr;
       EventManager evtMgr(clusterMgr);
-      for (int entry = 0; entry < 1000; entry++) {
+      for (int entry = 0; entry < 200; entry++) {
          evtMgr.Advance(clusterMgr);
          // Process event data; 0.01s/event
          Ops::WasteCPU(0.01);
