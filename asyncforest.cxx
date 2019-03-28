@@ -245,6 +245,7 @@ namespace Axel {
       /// If the index is larger than the current cluster index, `Advance()`.
       void PossiblyAdvance(int idx)
       {
+         /// FIXME: this needs compare_exchange!
          if (fClusterIdx < idx)
             Advance();
       }
