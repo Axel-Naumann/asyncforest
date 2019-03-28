@@ -259,12 +259,6 @@ namespace Axel {
       Data::Buffer fCurrent; ///< Currently active `Data::Buffer`.
       std::future<Data::Buffer> fNext; ///< Future on the next buffer.
 
-      /// Helper to get the `Data::Basket`.
-      auto &GetCurrentBasket(ClusterManager &clusterMgr)
-      {
-         return GetBranch(clusterMgr).fBaskets[fCurrentBasket];
-      }
-
       /// Construct from the branch index and the `ClusterManager`.
       BufferManager(int idx, ClusterManager &clusterMgr):
       fBranchIdx(idx), fCurrent(Ops::Decompression_t()(GetCurrentBasket(clusterMgr)))
@@ -278,6 +272,12 @@ namespace Axel {
          return clusterMgr.fCurrent.fBranches[fBranchIdx];
       }
 
+      /// Helper to get the `Data::Basket`.
+      Data::Basket &GetCurrentBasket(ClusterManager &clusterMgr)
+      {
+         return GetBranch(clusterMgr).fBaskets[fCurrentBasket];
+      }
+
       /// Advance to next basket in `Data::Cluster`. This might advance the
       /// `Data::Cluster`.
       void Advance(ClusterManager &clusterMgr)
@@ -289,7 +289,7 @@ namespace Axel {
             fCurrentBasket = 0;
             ++fCurrentCluster;
             clusterMgr.PossiblyAdvance(fCurrentCluster);
-         } 
+         }
          fNext = std::async(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
       }
 
