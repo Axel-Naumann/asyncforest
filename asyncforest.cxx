@@ -52,10 +52,23 @@
 ///
 /// Add jitter! Add more scheduling options (e.g. what `TTree` does)!
 ///
+///
+/// # Results
+///
+/// Throughput (entries/second) on Axel's laptop with 1s per entry processing
+/// ("analysis") - for "skip2", only even entry numbers are "analyzed".
+/// "Default" means TRemoteIO, TDecompress, TDeserialize.
+///
+/// nBranches:               10000 |  5
+/// =====================================
+/// Default                 | 0.17 | 0.96
+/// ^ but skip2             | 0.18 | 1.75
+/// TDeserializeTransparent | 0.33 | 0.97
+/// ^ but skip2             | 0.38 | 1.89
 
 /// Data mockup.
 namespace Data {
-   constexpr const int kNumBranches = 1000;
+   constexpr const int kNumBranches = 5; //10000;
 
    /// Possibly compressed bytes. Comes from raw storage.
    struct Basket {
@@ -391,8 +404,10 @@ namespace Axel {
       auto start = clock::now();
       for (int entry = 0; entry < 200; entry++) {
          evtMgr.Advance(clusterMgr);
-         // Process event data; 0.01s/event
-         Ops::WasteCPU(0.01);
+         if (entry % 2 == 0) {
+            // Process event data; 0.01s/event
+            Ops::WasteCPU(1);
+         }
 
          double seconds = (clock::now() - start).count() / 1'000'000'000.;
          if (seconds > 20)
