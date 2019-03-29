@@ -156,16 +156,15 @@ void WasteCPU(float sec)
 } 
 
 /// Call something asynchronously if it takes time, or synchronously if not.
-template <class OP, class FUNC, class... ARGS>
-auto AsyncOrNot(FUNC func, ARGS... args) {
-   constexpr const std::launch launchDefault
-      = std::launch::async | std::launch::deferred;
+template <class OP, class... ARGS>
+auto AsyncOrNot(const OP& op, ARGS... args) -> decltype(std::async(op, args...)) {
+   if (OP::kIsWorthATask) {
+      // Simulate task scheduling overhead; Andrei says "less than 1 millisecond"
+      WasteCPU(0.001);
+      return std::async(op, args...);
+   }
 
-   // Simulate task scheduling overhead:
-   if (OP::kIsWorthATask)
-      WasteCPU(0.01);
-
-   return std::async(OP::kIsWorthATask ? launchDefault : std::launch{}, func, args...);
+   return std::async(std::launch::deferred, op, args...);
 }
 
 /// Simulate grabbing a `Cluster` from remote.
