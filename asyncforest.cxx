@@ -58,6 +58,8 @@
 /// Throughput (entries/second) on Axel's laptop with 1s per entry processing
 /// ("analysis") - for "skip2", only even entry numbers are "analyzed".
 /// "Default" means TRemoteIO, TDecompress, TDeserialize.
+/// "All sync no-ops" means the inverse: TLocalIO, TUncompressed, TDeserializeTransparent,
+/// where everything is running on the main thread (i.e. no threading involved).
 ///
 /// nBranches:               10000 |  5
 /// =====================================
@@ -65,7 +67,7 @@
 /// ^ but skip2             | 0.07 | 1.78
 /// TDeserializeTransparent | 0.23 | 0.97
 /// ^ but skip2             | 0.26 | 1.94
-/// All non-async ops       | 1.01 | 1.00
+/// All sync no-ops         | 1.01 | 1.00
 
 /// Data mockup.
 namespace Data {
