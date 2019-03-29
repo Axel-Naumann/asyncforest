@@ -1,2 +1,2 @@
 # asyncforest
-Asyncronous scheduling of I/O tasks for RForst (demonstrator / testbed) 
+Asynchronous scheduling of I/O tasks for RForest (demonstrator / testbed) 
