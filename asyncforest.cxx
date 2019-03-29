@@ -414,7 +414,7 @@ namespace Axel {
       EventManager evtMgr(clusterMgr);
       using clock = std::chrono::high_resolution_clock;
       auto start = clock::now();
-      for (int entry = 0; entry < 200; entry++) {
+      while (true) {
          evtMgr.Advance(clusterMgr);
          // Process event data; 0.01s/event
          Ops::WasteCPU(0.01);
@@ -437,7 +437,8 @@ void time(FUNC &func)
    auto start = clock::now();
    int nEntries = func();
    double seconds = (clock::now() - start).count() / 1'000'000'000.;
-   std::cout << nEntries / seconds << " entries/s\n";
+   std::cout << nEntries / seconds << " entries/s == "
+      << seconds / nEntries << "s/Entry\n";
 }
 
 /// Time the different scheduling options.
