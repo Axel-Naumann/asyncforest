@@ -253,14 +253,13 @@ namespace Axel {
    /// Provides the current `Data::Cluster`, `async`-ing the next one.
    struct ClusterManager {
       Data::Cluster fCurrent = Ops::IO_t()(); ///< Current cluster.
-      int fClusterIdx = 0; ///< Index of the current cluster.
+      std::atomic_int fClusterIdx = 0; ///< Index of the current cluster.
       std::future<Data::Cluster> fNext{std::async(Ops::IO_t())}; ///< Future on the next cluster.
 
       /// Move the next cluster to the current, start grabbing the next one,
       /// increment index.
       void Advance()
       {
-         ++fClusterIdx;
          fCurrent = std::move(fNext.get());
          fNext = std::async(Ops::IO_t());
       }
@@ -269,8 +268,17 @@ namespace Axel {
       void PossiblyAdvance(int idx)
       {
          /// FIXME: this needs compare_exchange!
-         if (fClusterIdx < idx)
-            Advance();
+         int clusterIdx = fClusterIdx.load(std::memory_order_relaxed);
+         if (clusterIdx >= idx)
+            return;
+
+         while(!fClusterIdx.compare_exchange_weak(clusterIdx, clusterIdx + 1,
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed)) {
+            if (fClusterIdx.load(std::memory_order_relaxed) ==  clusterIdx + 1)
+               return;
+         }
+         Advance();
       }
    };
 
@@ -390,8 +398,8 @@ namespace Axel {
          if (seconds > 20)
             break;
       }
-      std::cout << "Processed " << clusterMgr.fClusterIdx + 1 << " clusters containing "
-         << evtMgr.fEntry << " entries\n";
+      std::cout << "Processed " << evtMgr.fEntry << " entries contained in "
+         << clusterMgr.fClusterIdx + 1 << " clusters\n";
       return evtMgr.fEntry;
    }
 } // namespace Axel
