@@ -172,7 +172,7 @@ struct TRemoteIO {
    static constexpr const bool kIsWorthATask = true;
 
    /// Simulate CPU behavior of remote I/O.
-   Data::Cluster operator()()
+   Data::Cluster operator()() const
    {
       std::cout << "Doing TRemoteIO!\n";
       // About 100MB/s:
@@ -186,7 +186,7 @@ struct TLocalIO {
    static constexpr const bool kIsWorthATask = false;
 
    /// Simulate CPU behavior of local I/O.
-   Data::Cluster operator()()
+   Data::Cluster operator()() const
    {
       std::cout << "Doing TLocalIO!\n";
       // About 10G/s
@@ -200,7 +200,7 @@ struct TDecompress {
    static constexpr const bool kIsWorthATask = true;
 
    /// Simulate CPU behavior of decompression.
-   Data::Buffer operator()(const Data::Basket &basket)
+   Data::Buffer operator()(const Data::Basket &basket) const
    {
       //std::cout << "Doing TDecompress!\n";
       // Oksana estimates lz4 aim: 300..400 MB/s; lzma 10 MB/s
@@ -214,7 +214,7 @@ struct TUncompressed {
    static constexpr const bool kIsWorthATask = false;
 
    /// Simulate CPU behavior of already uncompressed `Data::Basket`s.
-   Data::Buffer operator()(const Data::Basket &basket)
+   Data::Buffer operator()(const Data::Basket &basket) const
    {
       //std::cout << "Doing TUncompressed!\n";
       return {basket.fPossiblyCompressedSizeMB, basket.fForestEntries};
@@ -226,7 +226,7 @@ struct TDeserialize {
    static constexpr const bool kIsWorthATask = true;
 
    /// Simulate conversion of a byte blob to objects.
-   Data::Member operator()(const Data::Buffer &buf)
+   Data::Member operator()(const Data::Buffer &buf) const
    {
       //std::cout << "Doing TDeserialize!\n";
       WasteCPU(buf.fUncompressedSizeMB / 1000.);
@@ -240,7 +240,7 @@ struct TDeserializeTransparent {
    static constexpr const bool kIsWorthATask = false;
 
    // Simulate "deserialization" e.g. an array of floats into an array of floats - no-op.
-   Data::Member operator()(const Data::Buffer &)
+   Data::Member operator()(const Data::Buffer &) const
    {
       //std::cout << "Doing TDeserializeTrivial!\n";
       return {};
@@ -266,14 +266,14 @@ namespace Axel {
    struct ClusterManager {
       Data::Cluster fCurrent = Ops::IO_t()(); ///< Current cluster.
       std::atomic_int fClusterIdx = 0; ///< Index of the current cluster.
-      std::future<Data::Cluster> fNext{std::async(Ops::IO_t())}; ///< Future on the next cluster.
+      std::future<Data::Cluster> fNext{AsyncOrNot(Ops::IO_t())}; ///< Future on the next cluster.
 
       /// Move the next cluster to the current, start grabbing the next one,
       /// increment index.
       void Advance()
       {
          fCurrent = std::move(fNext.get());
-         fNext = std::async(Ops::IO_t());
+         fNext = AsyncOrNot(Ops::IO_t());
       }
 
       /// If the index is larger than the current cluster index, `Advance()`.
@@ -307,7 +307,7 @@ namespace Axel {
       BufferManager(int idx, ClusterManager &clusterMgr):
       fBranchIdx(idx), fCurrent(Ops::Decompression_t()(GetCurrentBasket(clusterMgr)))
       {
-         fNext = std::async(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
+         fNext = AsyncOrNot(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
       }
 
       /// Helper to get the `Data::Branch`.
@@ -334,7 +334,7 @@ namespace Axel {
             ++fCurrentCluster;
             clusterMgr.PossiblyAdvance(fCurrentCluster);
          }
-         fNext = std::async(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
+         fNext = AsyncOrNot(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
       }
 
       /// Advance the entry inside `fCurrent`; might `Advance()` to `fNext`.
@@ -355,6 +355,17 @@ namespace Axel {
       std::future<Data::Event> fNext; ///< Future on next event.
       long long fEntry = 0; ///< Current entry number.
 
+      /// "Operation" to only assemble asynchronously if Deserialization_t::kIsWorthATask.
+      struct AssembleOps {
+         EventManager* fThis;
+         ClusterManager& fClusterMgr;
+         static constexpr const bool kIsWorthATask = Ops::Deserialization_t::kIsWorthATask;
+         auto operator()() const
+         {
+            return fThis->Assemble(fClusterMgr);
+         }
+      };
+
       /// Construct from an `ClusterManager`. Initializes the `BufferManager`
       /// for each branch, and gets the first `Data::Event`.
       EventManager(ClusterManager& clusterMgr)
@@ -363,7 +374,7 @@ namespace Axel {
             fBufferMgrs.emplace_back(i, clusterMgr);
 
          fCurrent = Assemble(clusterMgr);
-         fNext = std::async([this, &clusterMgr] {return Assemble(clusterMgr);});
+         fNext = Ops::AsyncOrNot(AssembleOps{this, clusterMgr});
       }
 
       /// Create a `Data::Event` by deserializing its `Data::Members`.
@@ -374,14 +385,16 @@ namespace Axel {
          // Advance to next buffer if needed.
          std::array<std::future<Data::Member>, Data::kNumBranches> futureMembers;
          int idx = 0;
-         for (auto &bufMgr: fBufferMgrs) {
-            bufMgr.NextEntry(clusterMgr);
-            futureMembers[idx++] = std::async(Ops::Deserialization_t(), bufMgr.fCurrent);
-         }
+         for (auto &bufMgr: fBufferMgrs)
+            futureMembers[idx++] = Ops::AsyncOrNot(Ops::Deserialization_t(), bufMgr.fCurrent);
+
          // Assemble Event from deserialized Member-s.
          Data::Event ret;
          for (int i = 0; i < Data::kNumBranches; ++i)
             ret.members[i] = futureMembers[i].get();
+
+         for (auto &bufMgr: fBufferMgrs)
+            bufMgr.NextEntry(clusterMgr);
          return ret;
       }
 
@@ -390,7 +403,7 @@ namespace Axel {
       {
          ++fEntry;
          fCurrent = std::move(fNext.get());
-         fNext = std::async([this, &clusterMgr] {return Assemble(clusterMgr);});
+         fNext = Ops::AsyncOrNot(AssembleOps{this, clusterMgr});
       }
    };
 
