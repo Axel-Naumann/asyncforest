@@ -419,9 +419,13 @@ namespace Axel {
          // Process event data; 0.01s/event
          Ops::WasteCPU(0.01);
 
-         double seconds = (clock::now() - start).count() / 1'000'000'000.;
-         if (seconds > 20)
-            break;
+         // Process at least 20 entries.
+         if (evtMgr.fEntry >= 20) {
+            // But then stop after 20 seconds.
+            double seconds = (clock::now() - start).count() / 1'000'000'000.;
+            if (seconds > 20)
+               break;
+         }
       }
       std::cout << "Processed " << evtMgr.fEntry << " entries contained in "
          << clusterMgr.fClusterIdx + 1 << " clusters\n";
