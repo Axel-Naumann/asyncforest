@@ -6,6 +6,7 @@
 #include <future>
 #include <iostream>
 #include <random>
+#include <utility>
 #include <vector>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -54,17 +55,18 @@
 
 /// Data mockup.
 namespace Data {
+   constexpr const int kNumBranches = 1000;
+
    /// Possibly compressed bytes. Comes from raw storage.
    struct Basket {
+      Basket(float size, int entries):
+         fPossiblyCompressedSizeMB(size), fForestEntries(entries) {}
       const float fPossiblyCompressedSizeMB;
       const int fForestEntries;
    };
 
    /// Collection of `Basket`s for one column.
    struct Branch {
-      Branch(std::initializer_list<Basket> il): fBaskets{il} {}
-      Branch(const Branch&) = default;
-      Branch(Branch&&) = default;
       std::vector<Basket> fBaskets;
    };
 
@@ -73,15 +75,34 @@ namespace Data {
       static constexpr const float kPossiblyCompressedSizeMB = 30.;
       std::vector<Branch> fBranches;
 
-      Cluster():
-         fBranches{
+      Cluster()
+      {
+         // Create branches. Sum of sizes needs to be kPossiblyCompressedSizeMB.
+         float sumMB = 0;
+         std::vector<std::vector<std::pair<float, int>>> sizeEntriesPattern{
             {{.3, 1}, {.4, 1}, {.3, 1}, {.5, 2}, {.6, 1}, {.5, 2}, {.3, 2}}, // 2.9MB
             {{.1, 10}}, // 0.1MB
             {{2., 10}}, // 2.0MB
             {{22.8, 10}}, // 22.8MB
             {{1., 4}, {1., 5}, {0.2, 1}} // 2.2MB
+         };
+
+         for (int i = 0; i < kNumBranches - 1; ++i) {
+            const auto &entry = sizeEntriesPattern[i % sizeEntriesPattern.size()];
+            fBranches.emplace_back();
+            for (auto &&[s, n]: entry) {
+               float size = s / kNumBranches * kPossiblyCompressedSizeMB / 30.;
+               sumMB += size;
+               fBranches.back().fBaskets.emplace_back(size, n);
+            }
          }
-      {}
+         if (sumMB > kPossiblyCompressedSizeMB) {
+            std::cerr << "ERROR: we already have " << sumMB << "MB worth of branches, cannot add one more to reach " << kPossiblyCompressedSizeMB << "MB!\n";
+            exit(1);
+         }
+         fBranches.emplace_back();
+         fBranches.back().fBaskets.emplace_back(kPossiblyCompressedSizeMB - sumMB, 10);
+      }
    };
 
    /// Uncompressed bytes. Contains serialized objects. The result of
@@ -94,11 +115,7 @@ namespace Data {
    /// Mockup data model: four members, each stored in their own `Branch`.
    struct Member {};
    struct Event {
-      Member m1;
-      Member m2;
-      Member m3;
-      Member m4;
-      Member m5;
+      std::array<Member, kNumBranches> members;
    };
 }
 
@@ -322,11 +339,9 @@ namespace Axel {
       /// for each branch, and gets the first `Data::Event`.
       EventManager(ClusterManager& clusterMgr)
       {
-         fBufferMgrs.emplace_back(0, clusterMgr);
-         fBufferMgrs.emplace_back(1, clusterMgr);
-         fBufferMgrs.emplace_back(2, clusterMgr);
-         fBufferMgrs.emplace_back(3, clusterMgr);
-         fBufferMgrs.emplace_back(4, clusterMgr);
+         for (int i = 0; i < Data::kNumBranches; ++i)
+            fBufferMgrs.emplace_back(i, clusterMgr);
+
          fCurrent = Assemble(clusterMgr);
          fNext = std::async([this, &clusterMgr] {return Assemble(clusterMgr);});
       }
@@ -337,14 +352,17 @@ namespace Axel {
       {
          // Get the next entry from each branch's buffer.
          // Advance to next buffer if needed.
-         std::array<std::future<Data::Member>, 5> futureMembers;
+         std::array<std::future<Data::Member>, Data::kNumBranches> futureMembers;
          int idx = 0;
          for (auto &bufMgr: fBufferMgrs) {
             bufMgr.NextEntry(clusterMgr);
             futureMembers[idx++] = std::async(Ops::Deserialization_t(), bufMgr.fCurrent);
          }
          // Assemble Event from deserialized Member-s.
-         return {futureMembers[0].get(), futureMembers[1].get(), futureMembers[2].get(), futureMembers[3].get(), futureMembers[4].get()};
+         Data::Event ret;
+         for (int i = 0; i < Data::kNumBranches; ++i)
+            ret.members[i] = futureMembers[i].get();
+         return ret;
       }
 
       /// Advance to next event; start assembling the new next.
@@ -357,17 +375,24 @@ namespace Axel {
    };
 
    /// Run on many entries, wasing CPU to simulate data processing / analysis.
-   void run()
+   int run()
    {
       ClusterManager clusterMgr;
       EventManager evtMgr(clusterMgr);
+      using clock = std::chrono::high_resolution_clock;
+      auto start = clock::now();
       for (int entry = 0; entry < 200; entry++) {
          evtMgr.Advance(clusterMgr);
          // Process event data; 0.01s/event
          Ops::WasteCPU(0.01);
+
+         double seconds = (clock::now() - start).count() / 1'000'000'000.;
+         if (seconds > 20)
+            break;
       }
-      std::cout << "Processed " << clusterMgr.fClusterIdx << " clusters containing "
+      std::cout << "Processed " << clusterMgr.fClusterIdx + 1 << " clusters containing "
          << evtMgr.fEntry << " entries\n";
+      return evtMgr.fEntry;
    }
 } // namespace Axel
 
@@ -377,8 +402,9 @@ void time(FUNC &func)
 {
    using clock = std::chrono::high_resolution_clock;
    auto start = clock::now();
-   func();
-   std::cout << (clock::now() - start).count() / 1'000'000'000. << "s\n";
+   int nEntries = func();
+   double seconds = (clock::now() - start).count() / 1'000'000'000.;
+   std::cout << nEntries / seconds << " entries/s\n";
 }
 
 /// Time the different scheduling options.
