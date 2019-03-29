@@ -150,7 +150,7 @@ void WasteCPU(float sec)
    auto start = clock::now();
    std::mt19937_64 prng;
    while((clock::now() - start).count() < sec * 1'000'000'000.) {
-      for (int rep = 0; rep < 1'000'000; rep++)
+      for (int rep = 0; rep < 1000; rep++)
          prng();
    }
 } 
