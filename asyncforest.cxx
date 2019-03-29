@@ -61,10 +61,11 @@
 ///
 /// nBranches:               10000 |  5
 /// =====================================
-/// Default                 | 0.17 | 0.96
-/// ^ but skip2             | 0.18 | 1.75
-/// TDeserializeTransparent | 0.33 | 0.97
-/// ^ but skip2             | 0.38 | 1.89
+/// Default                 | 0.07 | 0.96
+/// ^ but skip2             | 0.07 | 1.78
+/// TDeserializeTransparent | 0.23 | 0.97
+/// ^ but skip2             | 0.26 | 1.94
+/// All non-async ops       | 1.01 | 1.00
 
 /// Data mockup.
 namespace Data {
