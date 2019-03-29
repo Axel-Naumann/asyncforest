@@ -68,7 +68,7 @@
 
 /// Data mockup.
 namespace Data {
-   constexpr const int kNumBranches = 5; //10000;
+   constexpr const int kNumBranches = 100;
 
    /// Possibly compressed bytes. Comes from raw storage.
    struct Basket {
@@ -395,7 +395,7 @@ namespace Axel {
       }
    };
 
-   /// Run on many entries, wasing CPU to simulate data processing / analysis.
+   /// Run on many entries, wasting CPU to simulate data processing / analysis.
    int run()
    {
       ClusterManager clusterMgr;
@@ -404,10 +404,8 @@ namespace Axel {
       auto start = clock::now();
       for (int entry = 0; entry < 200; entry++) {
          evtMgr.Advance(clusterMgr);
-         if (entry % 2 == 0) {
-            // Process event data; 0.01s/event
-            Ops::WasteCPU(1);
-         }
+         // Process event data; 0.01s/event
+         Ops::WasteCPU(0.01);
 
          double seconds = (clock::now() - start).count() / 1'000'000'000.;
          if (seconds > 20)
