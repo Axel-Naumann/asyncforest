@@ -30,7 +30,7 @@
 /// The operations can be scheduled synchronously: when a new `Buffer` is needed,
 /// the next one is grabbed from the `Branch` and decompressed, then things go on.
 /// Or, as done by the "managers" in `Axel`, everything is connected by data
-/// dependencies modeled as `std::future`s. The use of `std::future` is an
+/// dependencies modelled as `std::future`s. The use of `std::future` is an
 /// implementation detail; the key ingredient here is there fine-grained dependency
 /// specification - without synchronization points - and the cost of double-
 /// buffering.
@@ -262,9 +262,9 @@ using Deserialization_t = TDeserialize;
 } // namespace Ops
 
 
-/// Scheduling by chaining operations through `std::future` as proposed by Axel.
+/// Scheduling by chaining operations through `std::future`.
 /// Possibly HPX-style.
-namespace Axel {
+namespace Futures {
 
    /// Provides the current `Data::Cluster`, `async`-ing the next one.
    struct ClusterManager {
@@ -435,7 +435,268 @@ namespace Axel {
          << clusterMgr.fClusterIdx + 1 << " clusters\n";
       return evtMgr.fEntry;
    }
-} // namespace Axel
+} // namespace Futures
+
+
+#include <coroutine>
+#include <exception>
+
+/// Scheduling by chaining operations through coroutines.
+namespace Coroutines {
+
+   // Adopted from Mateusz Fila!
+   
+   namespace Internal {
+   
+   // Simple coroutine that can yield values.
+   // Doesn't return a value. Rethrows exceptions on get.
+   template <typename T>
+   class [[nodiscard]] SimpleGenerator {
+   public:
+       struct promise_type;  // typedef required by coroutines
+       using handle_type =
+           std::coroutine_handle<promise_type>;  // not required but useful
+   
+       SimpleGenerator(handle_type coroutine_handle)
+           : m_coroutine(coroutine_handle) {}  // required by coroutines
+       ~SimpleGenerator() {
+           if (m_coroutine) {
+               m_coroutine.destroy();
+           }
+       }
+       SimpleGenerator() = default;
+       SimpleGenerator(const SimpleGenerator&) = delete;
+       SimpleGenerator& operator=(const SimpleGenerator&) = delete;
+       SimpleGenerator(SimpleGenerator&& other) noexcept
+           : m_coroutine{other.m_coroutine} {
+           other.m_coroutine = {};
+       }
+       SimpleGenerator& operator=(SimpleGenerator&& other) noexcept {
+           if (this != &other) {
+               if (m_coroutine) {
+                   m_coroutine.destroy();
+               }
+               m_coroutine = other.m_coroutine;
+               other.m_coroutine = {};
+           }
+           return *this;
+       }
+       // resume the coroutine from outside and get yielded value
+       T get() const {
+           if (!m_coroutine.done()) {
+               m_coroutine.resume();
+           }
+           if (m_coroutine.promise().exception) {
+               std::rethrow_exception(m_coroutine.promise().exception);
+           }
+           return m_coroutine.promise().m_value;
+       }
+       // check if finished from outside
+       inline bool done() const { return m_coroutine.done(); }
+   
+       private:
+       handle_type m_coroutine;
+   };
+   
+   template <typename T>
+   struct SimpleGenerator<T>::promise_type {
+       // storage for exceptions thrown in the coroutine
+       std::exception_ptr exception;
+       // yielded value
+       T m_value{};
+       // required by coroutines
+       SimpleGenerator get_return_object() {
+           return {SimpleGenerator::handle_type::from_promise(*this)};
+       }
+       // called on coroutine start
+       std::suspend_always initial_suspend() const { return {}; }
+       // called on coroutine completion
+       std::suspend_always final_suspend() const noexcept { return {}; }
+       // acts as a catch block for exceptions thrown in the coroutine
+       void unhandled_exception() { exception = std::current_exception(); }
+       // called on (implicit or explicit) co_return or co_return_void
+       void return_void() const {}
+       std::suspend_always yield_value(T value) {
+           m_value = std::move(value);
+           return {};
+       }
+   };
+   
+   }  // namespace Internal
+   
+   /// Provides the current `Data::Cluster`, `async`-ing the next one.
+   struct ClusterManager {
+      Data::Cluster fCurrent = Ops::IO_t()(); ///< Current cluster.
+      std::atomic_int fClusterIdx = 0; ///< Index of the current cluster.
+      std::future<Data::Cluster> fNext{AsyncOrNot(Ops::IO_t())}; ///< Future on the next cluster.
+
+      /// Move the next cluster to the current, start grabbing the next one,
+      /// increment index.
+      void Advance()
+      {
+         fCurrent = std::move(fNext.get());
+         fNext = AsyncOrNot(Ops::IO_t());
+      }
+
+      /// If the index is larger than the current cluster index, `Advance()`.
+      void PossiblyAdvance(int idx)
+      {
+         /// FIXME: this needs compare_exchange!
+         int clusterIdx = fClusterIdx.load(std::memory_order_relaxed);
+         if (clusterIdx >= idx)
+            return;
+
+         while(!fClusterIdx.compare_exchange_weak(clusterIdx, clusterIdx + 1,
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed)) {
+            if (fClusterIdx.load(std::memory_order_relaxed) ==  clusterIdx + 1)
+               return;
+         }
+         Advance();
+      }
+   };
+
+   /// Provides the current `Data::Buffer`, `async`-ing the next one.
+   struct BufferManager {
+      int fBranchIdx; ///< Index of the `Data::Branch` within `Data::Cluster::fBranches`.
+      int fCurrentCluster = 0; ///< Current cluster index, so we can tell ClusterManager to read the next one (once).
+      int fCurrentBasket = 0; ///< Current basket index.
+      int fCurrentEntry = 0; ///< Current entry within `fCurrent`.
+      Data::Buffer fCurrent; ///< Currently active `Data::Buffer`.
+      std::future<Data::Buffer> fNext; ///< Future on the next buffer.
+
+      /// Construct from the branch index and the `ClusterManager`.
+      BufferManager(int idx, ClusterManager &clusterMgr):
+      fBranchIdx(idx), fCurrent(Ops::Decompression_t()(GetCurrentBasket(clusterMgr)))
+      {
+         fNext = AsyncOrNot(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
+      }
+
+      /// Helper to get the `Data::Branch`.
+      Data::Branch &GetBranch(ClusterManager &clusterMgr)
+      {
+         return clusterMgr.fCurrent.fBranches[fBranchIdx];
+      }
+
+      /// Helper to get the `Data::Basket`.
+      Data::Basket &GetCurrentBasket(ClusterManager &clusterMgr)
+      {
+         return GetBranch(clusterMgr).fBaskets[fCurrentBasket];
+      }
+
+      /// Advance to next basket in `Data::Cluster`. This might advance the
+      /// `Data::Cluster`.
+      void Advance(ClusterManager &clusterMgr)
+      {
+         ++fCurrentBasket;
+         fCurrent = std::move(fNext.get());
+         if (fCurrentBasket == GetBranch(clusterMgr).fBaskets.size()) {
+            // Need a new cluster.
+            fCurrentBasket = 0;
+            ++fCurrentCluster;
+            clusterMgr.PossiblyAdvance(fCurrentCluster);
+         }
+         fNext = AsyncOrNot(Ops::Decompression_t(), GetCurrentBasket(clusterMgr));
+      }
+
+      /// Advance the entry inside `fCurrent`; might `Advance()` to `fNext`.
+      void NextEntry(ClusterManager &clusterMgr)
+      {
+         ++fCurrentEntry;
+         if (fCurrentEntry == fCurrent.fForestEntries) {
+            fCurrentEntry = 0;
+            Advance(clusterMgr);
+         }
+      }
+   };
+
+   /// Provides the current `Data::Event`, `async`-ing the next one.
+   struct EventManager {
+      std::vector<BufferManager> fBufferMgrs; ///< `BufferManager` for each branch / data member.
+      Data::Event fCurrent; ///< Current deserialized event.
+      std::future<Data::Event> fNext; ///< Future on next event.
+      long long fEntry = 0; ///< Current entry number.
+
+      /// "Operation" to only assemble asynchronously if Deserialization_t::kIsWorthATask.
+      struct AssembleOps {
+         EventManager* fThis;
+         ClusterManager& fClusterMgr;
+         static constexpr const bool kIsWorthATask = Ops::Deserialization_t::kIsWorthATask;
+         auto operator()() const
+         {
+            return fThis->Assemble(fClusterMgr);
+         }
+      };
+
+      /// Construct from an `ClusterManager`. Initializes the `BufferManager`
+      /// for each branch, and gets the first `Data::Event`.
+      EventManager(ClusterManager& clusterMgr)
+      {
+         for (int i = 0; i < Data::kNumBranches; ++i)
+            fBufferMgrs.emplace_back(i, clusterMgr);
+
+         fCurrent = Assemble(clusterMgr);
+         fNext = Ops::AsyncOrNot(AssembleOps{this, clusterMgr});
+      }
+
+      /// Create a `Data::Event` by deserializing its `Data::Members`.
+      /// This might advance one or more `Data::Buffer`s.
+      Data::Event Assemble(ClusterManager &clusterMgr)
+      {
+         // Get the next entry from each branch's buffer.
+         // Advance to next buffer if needed.
+         std::array<std::future<Data::Member>, Data::kNumBranches> futureMembers;
+         int idx = 0;
+         for (auto &bufMgr: fBufferMgrs)
+            futureMembers[idx++] = Ops::AsyncOrNot(Ops::Deserialization_t(), bufMgr.fCurrent);
+
+         // Assemble Event from deserialized Member-s.
+         Data::Event ret;
+         for (int i = 0; i < Data::kNumBranches; ++i)
+            ret.members[i] = futureMembers[i].get();
+
+         for (auto &bufMgr: fBufferMgrs)
+            bufMgr.NextEntry(clusterMgr);
+         return ret;
+      }
+
+      /// Advance to next event; start assembling the new next.
+      void Advance(ClusterManager &clusterMgr)
+      {
+         ++fEntry;
+         fCurrent = std::move(fNext.get());
+         fNext = Ops::AsyncOrNot(AssembleOps{this, clusterMgr});
+      }
+   };
+
+   /// Run on many entries, wasting CPU to simulate data processing / analysis.
+   int run()
+   {
+      ClusterManager clusterMgr;
+      EventManager evtMgr(clusterMgr);
+      using clock = std::chrono::high_resolution_clock;
+      auto start = clock::now();
+      while (true) {
+         evtMgr.Advance(clusterMgr);
+         // Process event data; 0.01s/event
+         Ops::WasteCPU(0.01);
+
+         // Process at least 20 entries.
+         if (evtMgr.fEntry >= 20) {
+            // But then stop after 20 seconds.
+            double seconds = (clock::now() - start).count() / 1'000'000'000.;
+            if (seconds > 20)
+               break;
+         }
+      }
+      std::cout << "Processed " << evtMgr.fEntry << " entries contained in "
+         << clusterMgr.fClusterIdx + 1 << " clusters\n";
+      return evtMgr.fEntry;
+   }
+} // namespace Coroutines
+
+
+
 
 /// Helper function to time `func`.
 template <class FUNC>
@@ -452,6 +713,7 @@ void time(FUNC &func)
 /// Time the different scheduling options.
 int main()
 {
-   time(Axel::run);
+   time(Futures::run);
+   time(Coroutines::run);
    return 0;
 }
