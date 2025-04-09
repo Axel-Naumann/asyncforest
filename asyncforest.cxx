@@ -445,77 +445,128 @@ namespace Coroutines {
 
 namespace Internal {
 
-// Simple coroutine that can yield values.
-// Doesn't return a value. Rethrows exceptions on get.
-template <typename T> class [[nodiscard]] SimpleGenerator {
+// Coroutine that can be nested and co_awaited on inside another coroutine.
+// Doesn't return a value, doesn't yield. Rethrows exceptions on resume.
+// The outer coroutine should be resumed from outside.
+template <class T>
+class [[nodiscard]] NestableTask {
 public:
-  struct promise_type; // typedef required by coroutines
-  using handle_type =
-      std::coroutine_handle<promise_type>; // not required but useful
+    struct promise_type;  // typedef required by coroutines
+    using handle_type =
+        std::coroutine_handle<promise_type>;  // not required but useful
 
-  SimpleGenerator(handle_type coroutine_handle)
-      : m_coroutine(coroutine_handle) {} // required by coroutines
-  ~SimpleGenerator() {
-    if (m_coroutine) {
-      m_coroutine.destroy();
+    NestableTask(handle_type coroutine_handle)
+        : m_coroutine(coroutine_handle) {}  // required by coroutines
+    ~NestableTask() {
+        if (m_coroutine) {
+            m_coroutine.destroy();
+        }
     }
-  }
-  SimpleGenerator() = default;
-  SimpleGenerator(const SimpleGenerator &) = delete;
-  SimpleGenerator &operator=(const SimpleGenerator &) = delete;
-  SimpleGenerator(SimpleGenerator &&other) noexcept
-      : m_coroutine{other.m_coroutine} {
-    other.m_coroutine = {};
-  }
-  SimpleGenerator &operator=(SimpleGenerator &&other) noexcept {
-    if (this != &other) {
+    NestableTask() = default;
+    NestableTask(const NestableTask&) = delete;
+    NestableTask& operator=(const NestableTask&) = delete;
+    NestableTask(NestableTask&& other) noexcept
+        : m_coroutine{other.m_coroutine} {
+        other.m_coroutine = {};
+    }
+    NestableTask& operator=(NestableTask&& other) noexcept {
+        if (this != &other) {
+            if (m_coroutine) {
+                m_coroutine.destroy();
+            }
+            m_coroutine = other.m_coroutine;
+            other.m_coroutine = {};
+        }
+        return *this;
+    }
+    // resume the coroutine from outside
+    inline void resume() const;
+    // check if finished from outside
+    inline bool done() const { return m_coroutine.done(); }
+
+    // awaitable interface
+    // don't skip suspensions
+    bool await_ready() const noexcept { return false; }
+    // when awaited, store the parent coroutine handle and resume this coroutine
+    inline auto await_suspend(handle_type handle) noexcept;
+    // nothing special on resume, doesn't produce a value
+    void await_resume() const noexcept {}
+
+    Data::Event get() const {
       if (m_coroutine) {
-        m_coroutine.destroy();
+        if (!m_coroutine.done()) {
+          // m_coroutine.resume();
+          throw std::runtime_error("Coroutine not finished");
+        }
+        if (m_coroutine.done()) {
+          return m_coroutine.promise().m_value;
+        }
+        throw std::runtime_error("Coroutine still not finished");
       }
-      m_coroutine = other.m_coroutine;
-      other.m_coroutine = {};
+      throw std::runtime_error("Invalid coroutine!");
+      return {};
     }
-    return *this;
-  }
-  // resume the coroutine from outside and get yielded value
-  T get() const {
+
+    private:
+    handle_type m_coroutine;
+};
+
+template <class T>
+struct NestableTask<T>::promise_type {
+    // storage for exceptions thrown in the coroutine
+    std::exception_ptr m_exception;
+    // handle to the parent coroutine if the coroutine has one
+    handle_type m_parent;
+    // Value
+    T m_value;
+
+    // required by coroutines
+    NestableTask get_return_object() {
+        return {NestableTask::handle_type::from_promise(*this)};
+    }
+    // called on coroutine start
+    std::suspend_always initial_suspend() const { return {}; }
+    // called on coroutine completion
+    // on final_suspend return control to the parent coroutine
+    auto final_suspend() const noexcept {
+        struct final_awaiter {
+            // don't skip suspensions
+            bool await_ready() const noexcept { return false; }
+            // resume the parent of the suspended coroutine if it has one
+            // or if not then continue control to the caller
+            std::coroutine_handle<> await_suspend(handle_type handle) noexcept {
+                auto parent = handle.promise().m_parent;
+                if (parent) {
+                    return parent;
+                }
+                return std::noop_coroutine();
+            }
+            // nothing special on resume, doesn't produce a value
+            void await_resume() const noexcept {}
+        };
+        return final_awaiter{};
+    }
+    // acts as a catch block for exceptions thrown in the coroutine
+    void unhandled_exception() { m_exception = std::current_exception(); }
+    // called on (implicit or explicit) co_return or co_return void
+    void return_value(Data::Event&& ev) { m_value = std::move(ev); }
+};
+
+template <class T>
+inline void NestableTask<T>::resume() const {
     if (!m_coroutine.done()) {
-      m_coroutine.resume();
+        m_coroutine.resume();
     }
-    if (m_coroutine.promise().exception) {
-      std::rethrow_exception(m_coroutine.promise().exception);
+    if (m_coroutine.promise().m_exception) {
+        std::rethrow_exception(m_coroutine.promise().m_exception);
     }
-    return m_coroutine.promise().m_value;
-  }
-  // check if finished from outside
-  inline bool done() const { return m_coroutine.done(); }
+}
 
-private:
-  handle_type m_coroutine;
-};
-
-template <typename T> struct SimpleGenerator<T>::promise_type {
-  // storage for exceptions thrown in the coroutine
-  std::exception_ptr exception;
-  // yielded value
-  T m_value{};
-  // required by coroutines
-  SimpleGenerator get_return_object() {
-    return {SimpleGenerator::handle_type::from_promise(*this)};
-  }
-  // called on coroutine start
-  std::suspend_always initial_suspend() const { return {}; }
-  // called on coroutine completion
-  std::suspend_always final_suspend() const noexcept { return {}; }
-  // acts as a catch block for exceptions thrown in the coroutine
-  void unhandled_exception() { exception = std::current_exception(); }
-  // called on (implicit or explicit) co_return or co_return_void
-  void return_void() const {}
-  std::suspend_always yield_value(T value) {
-    m_value = std::move(value);
-    return {};
-  }
-};
+template <class T>
+inline auto NestableTask<T>::await_suspend(handle_type handle) noexcept {
+    m_coroutine.promise().m_parent = handle;
+    return m_coroutine;
+}
 
 } // namespace Internal
 
@@ -607,7 +658,7 @@ struct EventManager {
   std::vector<BufferManager>
       fBufferMgrs;      ///< `BufferManager` for each branch / data member.
   Data::Event fCurrent; ///< Current deserialized event.
-  std::future<Data::Event> fNext; ///< Future on next event.
+  Internal::NestableTask<Data::Event> fNext; ///< Promise on next event.
   long long fEntry = 0;           ///< Current entry number.
 
   /// "Operation" to only assemble asynchronously if
@@ -626,13 +677,14 @@ struct EventManager {
     for (int i = 0; i < Data::kNumBranches; ++i)
       fBufferMgrs.emplace_back(i, clusterMgr);
 
-    fCurrent = Assemble(clusterMgr);
-    fNext = Ops::AsyncOrNot(AssembleOps{this, clusterMgr});
+    auto coCurrent = Assemble(clusterMgr);
+    fCurrent = coCurrent.get();
+    fNext = AssembleOps{this, clusterMgr}();
   }
 
   /// Create a `Data::Event` by deserializing its `Data::Members`.
   /// This might advance one or more `Data::Buffer`s.
-  Data::Event Assemble(ClusterManager &clusterMgr) {
+  Internal::NestableTask<Data::Event> Assemble(ClusterManager &clusterMgr) {
     // Get the next entry from each branch's buffer.
     // Advance to next buffer if needed.
     std::array<std::future<Data::Member>, Data::kNumBranches> futureMembers;
@@ -648,14 +700,14 @@ struct EventManager {
 
     for (auto &bufMgr : fBufferMgrs)
       bufMgr.NextEntry(clusterMgr);
-    return ret;
+    co_return ret;
   }
 
   /// Advance to next event; start assembling the new next.
   void Advance(ClusterManager &clusterMgr) {
     ++fEntry;
     fCurrent = std::move(fNext.get());
-    fNext = Ops::AsyncOrNot(AssembleOps{this, clusterMgr});
+    fNext = AssembleOps{this, clusterMgr}();
   }
 };
 
@@ -696,7 +748,7 @@ template <class FUNC> void time(FUNC &func) {
 
 /// Time the different scheduling options.
 int main() {
-  time(Futures::run);
+  //time(Futures::run);
   time(Coroutines::run);
   return 0;
 }
